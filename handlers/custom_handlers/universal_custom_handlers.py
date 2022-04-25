@@ -8,7 +8,7 @@ from keyboards.reply.reply_keyboard import hotel_count_keyboard, photo_answer_ke
 from loader import bot
 from loguru import logger
 from telebot.types import Message, CallbackQuery
-from rapidapi import city_founding, lowprice_highprice_command, bestdeal_command
+from rapidapi import city_founding, bestdeal_hotel_information, hotel_information
 from user import User
 import re
 
@@ -282,33 +282,39 @@ def print_info(message: Message) -> None:
     cur_user = User.get_user(user_id=message.chat.id)
     command = cur_user.command
     if command == '/lowprice' or command == '/highprice':
-        result = lowprice_highprice_command(user_id=message.chat.id)
+        result = hotel_information(user_id=message.chat.id)
     else:
-        result = bestdeal_command(user_id=message.chat.id)
+        result = bestdeal_hotel_information(user_id=message.chat.id)
+    if result is None:
+        bot.send_message(chat_id=message.chat.id, text='Что-то пошло не так! Попробуйте ещё раз!')
+        help_handler(message)
+        logger.error(f"Command {command} for user {message.chat.id} not completed")
+        return
     photo_result = cur_user.photo_count
     if photo_result != 0:
-        for keyboard, hotel, photo in result:
+        for hotel_name, keyboard, hotel, photo in result:
             try:
                 bot.send_media_group(chat_id=message.chat.id, media=photo)
                 bot.send_message(chat_id=message.chat.id,
                                  text=hotel,
                                  disable_web_page_preview=True,
                                  reply_markup=keyboard)
-            except telebot.apihelper.ApiTelegramException:
-                pass
+            except telebot.apihelper.ApiTelegramException as exception:
+                logger.error(f"Couldn't output photos or text for {hotel_name}: {exception}")
     else:
-        for keyboard, hotel in result:
+        for hotel_name, keyboard, hotel in result:
             try:
                 bot.send_message(chat_id=message.chat.id,
                                  text=hotel,
                                  reply_markup=keyboard)
-            except telebot.apihelper.ApiTelegramException:
-                pass
+            except telebot.apihelper.ApiTelegramException as exception:
+                logger.error(f"Couldn't output photos or text for {hotel_name}: {exception}")
     Users.create(user_id=cur_user.user_id, command=cur_user.command, city_id=cur_user.city_id,
                  price_min=cur_user.price_min, price_max=cur_user.price_max,
                  check_in=cur_user.check_in, check_out=cur_user.check_out, distance_min=cur_user.distance_min,
                  distance_max=cur_user.distance_max, hotel_count=cur_user.hotel_count,
                  photo_count=cur_user.photo_count).save()
+    logger.info(f"Hotel information for destination id {cur_user.city_id} was completed")
     keyboard = photo_answer_keyboard()
     new_message = bot.send_message(chat_id=message.chat.id, text='Поиск отелей заверешен! Хотите продолжить поиск?', reply_markup=keyboard)
     bot.register_next_step_handler(message=new_message, callback=restart)
