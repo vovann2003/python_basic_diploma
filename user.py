@@ -1,7 +1,10 @@
 class User:
+    """
+    Класс User. Реализован многопользовательский режим
+    """
     users = dict()
 
-    def __init__(self, user_id: int):
+    def __init__(self, user_id: int) -> None:
         self.user_id = user_id
         self.command = ''
         self.city_id = None
