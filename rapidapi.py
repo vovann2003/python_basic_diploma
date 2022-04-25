@@ -2,10 +2,11 @@ from datetime import datetime
 import requests
 import json
 from loguru import logger
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
+from telebot.types import InputMediaPhoto
 from config_data import config
 import re
 from database.history_db.history_database import History
+from keyboards.inline.inline_keyboard import hotel_keyboard
 from user import *
 
 RAPIDAPI_KEY = config.RAPID_API_KEY
@@ -36,7 +37,7 @@ def city_founding(destination: str):
     if not response:
         print('При поиске возникла ошибка! Попробуйте снова\n')
         return None
-    else:
+    try:
         suggestions = json.loads(response)["suggestions"][0]["entities"]
         if suggestions:
             for element in suggestions:
@@ -44,8 +45,8 @@ def city_founding(destination: str):
                 destinationId = element['destinationId']
                 destinations[int(destinationId)] = caption
             return destinations
-        else:
-            pass
+    except (requests.exceptions.ReadTimeout, IndexError) as ex:
+        logger.error(f"Couldn't find destinations for {destination}: {ex}")
 
 
 @logger.catch
@@ -87,10 +88,9 @@ def hotel_info(destination_id: str, page_number: str, hotel_count: str,
             price = element['ratePlan']['price']
             hotels['hotel_price'] = price.get('exactCurrent', ' ')
             hotels['hotel_info'] = price.get('info', ' ')
-            hotels['hotel_url'] = f'https://ua.hotels.com/ho{hotels["hotel_id"]}/' \
-                                  f'?q-check-in={check_in}' \
-                                  f'&q-check-out={check_out}' \
-                                  f'&q-rooms=1&q-room-0-adults=2&q-room-0-children=0'
+            hotels['hotel_url'] = f"""https://ua.hotels.com/ho{hotels["hotel_id"]}/
+                                      ?q-check-in={check_in}&q-check-out={check_out}
+                                      &q-rooms=1&q-room-0-adults=2&q-room-0-children=0 """
             yield hotels
     except requests.exceptions.ReadTimeout as exception:
         logger.info(f"Couldn't find hotel_info by destination_id {destination_id}: {exception}")
@@ -108,12 +108,11 @@ def photo_info(hotel_id: str, photo_amount: int):
             yield url
     except (IndexError, requests.ReadTimeout, KeyError) as ex:
         logger.error(f"Couldn't find hotel photo for hotel_id {hotel_id}: {ex}")
-        return list()
 
 
-def lowprice_highprice_command(user_id: int):
+def lowprice_highprice_command(user_id: int) -> dict or None:
     """
-    Функция, которая получает информацию из базы данных для команды /lowprice или /highprice
+    Функция для поиска вариантов отелей в выбранном городе для команд /lowprice и /highprice
     """
     sort_order = None
     cur_user = User.get_user(user_id=user_id)
@@ -122,7 +121,6 @@ def lowprice_highprice_command(user_id: int):
     check_in = cur_user.check_in
     check_out = cur_user.check_out
     hotels_count = cur_user.hotel_count
-    photo_count = cur_user.photo_count
     if command == '/lowprice':
         sort_order = 'PRICE'
     elif command == '/highprice':
@@ -131,86 +129,117 @@ def lowprice_highprice_command(user_id: int):
                         check_out=check_out, price_min=None, price_max=None, sort_order=sort_order)
     if result is None:
         return None
+    return result
+
+
+def hotel_information(user_id: int):
+    """
+    Функция, которая собирает информацию об отелях для команд /lowprice и /highprice
+    """
+    cur_user = User.get_user(user_id=user_id)
+    check_in = cur_user.check_in
+    check_out = cur_user.check_out
+    command = cur_user.command
+    photo_count = cur_user.photo_count
     checks_in = str(check_in).split('-')
     checks_out = str(check_out).split('-')
     nights_count = int(checks_out[2]) - int(checks_in[2])
+    hotels = lowprice_highprice_command(user_id=user_id)
     hotel_text = ''
-    for index, hotel in enumerate(result, start=1):
-        keyboard = InlineKeyboardMarkup()
-        button_1 = InlineKeyboardButton(url=hotel['hotel_url'], callback_data='yes', text='Забронировать')
-        button_2 = InlineKeyboardButton(
-            url=f"https://www.google.com.ua/maps/@{hotel['hotel_latitude']},{hotel['hotel_longitude']},20z?hl=ru",
-            text='Карта')
-        keyboard.add(button_1, button_2)
+    for index, hotel in enumerate(hotels, start=1):
+        keyboard = hotel_keyboard(hotel)
         one_night_price = hotel['hotel_price']
         total = round(int(one_night_price) * nights_count, 3)
-        hotels_info = f"{index}) {hotel['hotel_name']}\n" \
-                      f"Рейтинг: {hotel['hotel_rating']} \u2B50\n" \
-                      f"Адрес: {hotel['hotel_country']}, {hotel['hotel_locality']}, {hotel['hotel_address']}\n" \
-                      f"Расстояние до центра: {hotel['hotel_distance_center']}\n" \
-                      f"Цена за одну ночь: ${one_night_price}\n" \
-                      f"Цена за весь период: ${total}\n"
+        hotels_info = f""" {index}) {hotel['hotel_name']}\n
+        Рейтинг: {hotel['hotel_rating']} \u2B50\n
+        Адрес: {hotel['hotel_country']}, {hotel['hotel_locality']}, {hotel['hotel_address']}\n
+        Расстояние до центра: {hotel['hotel_distance_center']}\n
+        Цена за одну ночь: ${one_night_price}\n
+        Цена за весь период: ${total}\n"""
         hotel_text += hotels_info + '\n'
-        photos = []
         if photo_count != 0:
-            result = photo_info(hotel_id=hotel['hotel_id'], photo_amount=photo_count)
-            for index_photo in result:
-                result = InputMediaPhoto(index_photo)
-                photos.append(result)
-            yield keyboard, hotels_info, photos
+            photos = photo_information(user_id=user_id, hotel=hotel)
+            yield hotel['hotel_name'], keyboard, hotels_info, photos
         else:
-            yield keyboard, hotels_info
+            yield hotel['hotel_name'], keyboard, hotels_info
     History.create(user_id=user_id, command=command, date_time=datetime.now(), hotels_info=hotel_text)
 
 
-def bestdeal_command(user_id: int):
+def photo_information(user_id: int, hotel: dict) -> list:
+    """
+    Функция собирает для пользователя нужное количество фотографий
+    """
+    cur_user = User.get_user(user_id=user_id)
+    photo_count = cur_user.photo_count
+    photos = []
+    if photo_count != 0:
+        result = photo_info(hotel_id=hotel['hotel_id'], photo_amount=photo_count)
+        for index_photo in result:
+            result = InputMediaPhoto(index_photo)
+            photos.append(result)
+            return photos
+
+
+def bestdeal_hotel_information(user_id: int):
+    """
+    Функция собирает информацию об отелях для команды /bestdeal
+    """
+    cur_user = User.get_user(user_id=user_id)
+    check_in = cur_user.check_in
+    check_out = cur_user.check_out
+    hotels_amount = int(cur_user.hotel_count)
+    photo_count = cur_user.photo_count
+    distance_min = cur_user.distance_min
+    distance_max = cur_user.distance_max
+    page_number = 1
+    hotels_count = 0
+    while hotels_count == 0 and int(hotels_amount) > 0:
+        hotels_count = 25
+        result = bestdeal_command(user_id=user_id)
+        checks_in = str(check_in).split('-')
+        checks_out = str(check_out).split('-')
+        nights_count = int(checks_out[2]) - int(checks_in[2])
+        hotel_text = ''
+        for index, hotel in enumerate(result, start=1):
+            hotels_count -= 1
+            keyboard = hotel_keyboard(hotel)
+            distance = float(hotel['hotel_distance_center'].split()[0].split(',')[0])
+            if not int(distance_min) < distance < int(distance_max):
+                one_night_price = hotel['hotel_price']
+                total = round(int(one_night_price) * nights_count, 3)
+                hotels_info = f""" {index}) {hotel['hotel_name']}\n
+                Рейтинг: {hotel['hotel_rating']} \u2B50\n
+                Адрес: {hotel['hotel_country']}, {hotel['hotel_locality']}, {hotel['hotel_address']}\n
+                Расстояние до центра: {hotel['hotel_distance_center']}\n
+                Цена за одну ночь: ${one_night_price}\n
+                Цена за весь период: ${total}\n"""
+                hotel_text += hotels_info + '\n'
+                if photo_count != 0:
+                    photos = photo_information(user_id=user_id, hotel=hotel)
+                    yield hotel['hotel_name'], keyboard, hotels_info, photos
+                else:
+                    yield hotel['hotel_name'], keyboard, hotels_info
+                hotels_amount -= 1
+            page_number += 1
+        History.create(user_id=user_id, command='/bestdeal', date_time=datetime.now(), hotels_info=hotel_text)
+
+
+def bestdeal_command(user_id: int) -> dict or None:
+    """
+    Функция для поиска отелей в выбранном городе для команды /bestdeal
+    """
     cur_user = User.get_user(user_id=user_id)
     price_min = cur_user.price_min
     price_max = cur_user.price_max
     city_id = cur_user.city_id
     check_in = cur_user.check_in
     check_out = cur_user.check_out
-    hotels_amount = cur_user.hotel_count
-    photo_count = cur_user.photo_count
-    distance_min = cur_user.distance_min
-    distance_max = cur_user.distance_max
-
-    result = hotel_info(destination_id=city_id, page_number='1', check_in=check_in, hotel_count=str(hotels_amount),
+    hotels_amount = int(cur_user.hotel_count)
+    page_number = 1
+    result = hotel_info(destination_id=city_id, page_number=str(page_number), check_in=check_in,
+                        hotel_count=str(hotels_amount),
                         check_out=check_out, price_min=price_min, price_max=price_max,
-                        sort_order='DISTANCE_FROM_LANDMARK')  # TODO Подскажите как продолжить поиск по другим страницам, если не нашлись отели на 1 странице?
+                        sort_order='DISTANCE_FROM_LANDMARK')
     if result is None:
         return None
-    checks_in = str(check_in).split('-')
-    checks_out = str(check_out).split('-')
-    nights_count = int(checks_out[2]) - int(checks_in[2])
-    hotel_text = ''
-    for index, hotel in enumerate(result, start=1):
-        keyboard = InlineKeyboardMarkup()
-        button_1 = InlineKeyboardButton(url=hotel['hotel_url'], callback_data='yes', text='Забронировать')
-        button_2 = InlineKeyboardButton(
-            url=f"https://www.google.com.ua/maps/@{hotel['hotel_latitude']},{hotel['hotel_longitude']},20z?hl=ru",
-            text='Карта')
-        keyboard.add(button_1, button_2)
-        if hotels_amount == 0:
-            break
-        distance = float(hotel['hotel_distance_center'].split()[0].split(',')[0])
-        if not int(distance_min) <= distance <= int(distance_max):
-            one_night_price = hotel['hotel_price']
-            total = round(int(one_night_price) * nights_count, 3)
-            hotels_info = f"{index}) {hotel['hotel_name']}\n" \
-                          f"Рейтинг: {hotel['hotel_rating']} \u2B50\n" \
-                          f"Адрес: {hotel['hotel_country']}, {hotel['hotel_locality']}, {hotel['hotel_address']}\n" \
-                          f"Расстояние до центра: {hotel['hotel_distance_center']}\n" \
-                          f"Цена за одну ночь: ${one_night_price}\n" \
-                          f"Цена за весь период: ${total}\n"
-            hotel_text += hotels_info + '\n'
-            photos = []
-            if photo_count != 0:
-                result = photo_info(hotel_id=hotel['hotel_id'], photo_amount=photo_count)
-                for index_photo in result:
-                    result = InputMediaPhoto(index_photo)
-                    photos.append(result)
-                yield keyboard, hotels_info, photos
-            else:
-                yield keyboard, hotels_info
-    History.create(user_id=user_id, command='/bestdeal', date_time=datetime.now(), hotels_info=hotel_text)
+    return result
